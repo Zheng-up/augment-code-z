@@ -1,0 +1,299 @@
+name: Modify VS Code Extension (Manual)
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+
+jobs:
+  modify-extension:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install required tools
+        run: |
+          npm install -g @vscode/vsce
+          sudo apt-get update
+          sudo apt-get install -y jq unzip
+
+      - name: Download Latest VSIX
+        run: |
+          PUBLISHER="augment"
+          EXTENSION_NAME="vscode-augment"
+          VSIX_URL="https://marketplace.visualstudio.com/_apis/public/gallery/publishers/${PUBLISHER}/vsextensions/${EXTENSION_NAME}/latest/vspackage"
+          curl -L --compressed -o original.vsix "${VSIX_URL}"
+          echo "VSIX downloaded successfully."
+
+      - name: Unpack VSIX
+        run: |
+          unzip -q original.vsix -d unpacked_ext
+          chmod -R u+w unpacked_ext
+          echo "VSIX unpacked successfully."
+
+      - name: Get extension version
+        id: get_version
+        run: |
+          VERSION=$(jq -r .version unpacked_ext/extension/package.json)
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
+          echo "Discovered extension version: ${VERSION}"
+
+      - name: Check if version already exists
+        id: check_version
+        run: |
+          TAG_NAME="augment-vscode-modified-v${VERSION}"
+          if git ls-remote --tags origin | grep -q "refs/tags/${TAG_NAME}$"; then
+            echo "Tag ${TAG_NAME} already exists, skipping build"
+            echo "skip_build=true" >> $GITHUB_OUTPUT
+          else
+            echo "Tag ${TAG_NAME} does not exist, proceeding with build"
+            echo "skip_build=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Find main entry file and variables
+        if: steps.check_version.outputs.skip_build == 'false'
+        run: |
+          # 查找主入口文件
+          MAIN_FILE=""
+          
+          # 尝试从 package.json 获取主入口文件
+          if [ -f "unpacked_ext/extension/package.json" ]; then
+            MAIN_ENTRY=$(jq -r '.main // empty' unpacked_ext/extension/package.json)
+            if [ -n "$MAIN_ENTRY" ] && [ -f "unpacked_ext/extension/$MAIN_ENTRY" ]; then
+              MAIN_FILE="unpacked_ext/extension/$MAIN_ENTRY"
+            fi
+          fi
+          
+          # 如果没找到，搜索包含特定模式的 JS 文件
+          if [ -z "$MAIN_FILE" ]; then
+            for file in $(find unpacked_ext/extension -name "*.js" -type f); do
+              if grep -q "handleAuthURI\|augment\.sessions" "$file" 2>/dev/null; then
+                MAIN_FILE="$file"
+                break
+              fi
+            done
+          fi
+          
+          # 如果还是没找到，使用第一个 JS 文件
+          if [ -z "$MAIN_FILE" ]; then
+            MAIN_FILE=$(find unpacked_ext/extension -name "*.js" -type f | head -1)
+          fi
+          
+          if [ -z "$MAIN_FILE" ]; then
+            echo "Error: No suitable JavaScript file found"
+            exit 1
+          fi
+          
+          echo "Found main file: $MAIN_FILE"
+          
+          # 备份原文件
+          cp "$MAIN_FILE" "${MAIN_FILE}.backup"
+          
+          # 查找变量名
+          SESSIONS_VAR=$(grep -o '[a-zA-Z_$][a-zA-Z0-9_$]*\s*=\s*"augment\.sessions"' "$MAIN_FILE" | sed 's/\s*=.*$//' | head -1)
+          EMAIL_VAR=$(grep -o '[a-zA-Z_$][a-zA-Z0-9_$]*\s*=\s*\["email"\]' "$MAIN_FILE" | sed 's/\s*=.*$//' | head -1)
+          
+          if [ -z "$SESSIONS_VAR" ] || [ -z "$EMAIL_VAR" ]; then
+            echo "Warning: Could not find required variable patterns, using fallback search"
+            # 尝试更宽松的搜索
+            SESSIONS_VAR=$(grep -o '[a-zA-Z_$][a-zA-Z0-9_$]*' "$MAIN_FILE" | grep -B5 -A5 "augment.sessions" | head -1)
+            EMAIL_VAR=$(grep -o '[a-zA-Z_$][a-zA-Z0-9_$]*' "$MAIN_FILE" | grep -B5 -A5 "email" | head -1)
+          fi
+          
+          # 如果还是找不到，使用默认值
+          if [ -z "$SESSIONS_VAR" ]; then
+            SESSIONS_VAR="x"
+          fi
+          if [ -z "$EMAIL_VAR" ]; then
+            EMAIL_VAR="y"
+          fi
+          
+          echo "Found sessions variable: $SESSIONS_VAR"
+          echo "Found email variable: $EMAIL_VAR"
+          
+          # 保存到环境变量
+          echo "SESSIONS_VAR=$SESSIONS_VAR" >> $GITHUB_ENV
+          echo "EMAIL_VAR=$EMAIL_VAR" >> $GITHUB_ENV
+          echo "MAIN_FILE=$MAIN_FILE" >> $GITHUB_ENV
+
+      - name: Apply modifications
+        if: steps.check_version.outputs.skip_build == 'false'
+        run: |
+          echo "Applying modifications to $MAIN_FILE"
+
+          # 创建修改脚本
+          cat > modify_script.js << 'EOF'
+          const fs = require('fs');
+          const path = process.argv[2];
+          const sessionsVar = process.argv[3];
+          const emailVar = process.argv[4];
+
+          let content = fs.readFileSync(path, 'utf8');
+
+          // 0. 插入文件头代码（如果 inject-code.txt 存在）
+          const injectCodePath = 'inject-code.txt';
+          if (fs.existsSync(injectCodePath)) {
+            const injectCode = fs.readFileSync(injectCodePath, 'utf8');
+            content = injectCode + '\n' + content;
+            console.log('✓ Injected header code from inject-code.txt');
+          } else {
+            console.log('ℹ inject-code.txt not found, skipping header injection');
+          }
+          
+          // 1. 添加新的 case 到 switch 语句
+          // 查找包含 handleAuthURI 的 case 语句并在其后添加新 case
+          const handleAuthURIPattern = /(case[^:]*:[^}]*handleAuthURI[^}]*break;)/;
+          const match = content.match(handleAuthURIPattern);
+          
+          if (match) {
+            // 从现有的 handleAuthURI 调用中提取对象名和参数名
+            const callPattern = /([a-zA-Z_$][a-zA-Z0-9_$]*)\s*\.\s*handleAuthURI\s*\(\s*([a-zA-Z_$][a-zA-Z0-9_$]*)\s*\)/;
+            const callMatch = match[1].match(callPattern);
+            
+            let objectName = 'this';
+            let paramName = 'e';
+            
+            if (callMatch) {
+              objectName = callMatch[1];
+              paramName = callMatch[2];
+              console.log(`✓ Extracted variables: ${objectName}.handleAuthURI(${paramName})`);
+            } else {
+              console.log('⚠ Could not extract variables from handleAuthURI call, using defaults');
+            }
+            
+            const newCase = `case "/autoAuth":${objectName}.handleAutoAuth(${paramName});break;`;
+            content = content.replace(handleAuthURIPattern, match[1] + newCase);
+            console.log('✓ Added new case to switch statement');
+          } else {
+            console.log('⚠ Could not find handleAuthURI case, trying alternative approach');
+            // 尝试在任何 break; 后添加，同时提取变量
+            const altPattern = /([a-zA-Z_$][a-zA-Z0-9_$]*)\s*\.\s*handleAuthURI\s*\(\s*([a-zA-Z_$][a-zA-Z0-9_$]*)\s*\)[^}]*break;/;
+            const altMatch = content.match(altPattern);
+            
+            if (altMatch) {
+              const objectName = altMatch[1];
+              const paramName = altMatch[2];
+              const newCase = `case "/autoAuth":${objectName}.handleAutoAuth(${paramName});break;`;
+              content = content.replace(altPattern, `$&${newCase}`);
+              console.log(`✓ Added case using extracted variables: ${objectName}.handleAutoAuth(${paramName})`);
+            } else {
+              console.log('⚠ Could not find handleAuthURI pattern, using fallback');
+              content = content.replace(/handleAuthURI[^}]*break;/, '$&case "/autoAuth":this.handleAutoAuth(e);break;');
+            }
+          }
+          
+          // 2. 添加新的 handleAutoAuth 方法
+          const newMethod = `async handleAutoAuth(e) {
+              try {
+                  const params = new URLSearchParams(e.query);
+                  const accessToken = params.get('token');
+                  const tenantURL = params.get('url');
+                  await this._context.secrets.store(${sessionsVar},JSON.stringify({accessToken,tenantURL,scopes:${emailVar}})); 
+                  this._sessionChangeEmitter.fire({accessToken,tenantURL,scopes:${emailVar}}); 
+              } catch (e) {
+                  this._logger.warn("Failed to process auth request:", e), this._programmaticCancellation.fire(mt(e))
+              }
+          }`;
+          
+          // 查找 async handleAuthURI 方法的结束位置
+          const methodPattern = /(async\s+handleAuthURI[^{]*\{(?:[^{}]|\{[^{}]*\})*\})/;
+          const methodMatch = content.match(methodPattern);
+          
+          if (methodMatch) {
+            content = content.replace(methodPattern, methodMatch[1] + newMethod);
+            console.log('✓ Added new handleAutoAuth method');
+          } else {
+            console.log('⚠ Could not find handleAuthURI method, appending at end');
+            content += '\n' + newMethod;
+          }
+          
+          fs.writeFileSync(path, content);
+          console.log('Modifications completed');
+          EOF
+          
+          # 运行修改脚本
+          node modify_script.js "$MAIN_FILE" "$SESSIONS_VAR" "$EMAIL_VAR"
+
+      - name: Verify modifications
+        if: steps.check_version.outputs.skip_build == 'false'
+        run: |
+          echo "Verifying modifications..."
+          
+          # 检查新的 case 是否添加成功
+          if grep -q 'case "/autoAuth"' "$MAIN_FILE"; then
+            echo "✓ New case added successfully"
+          else
+            echo "✗ Failed to add new case"
+            exit 1
+          fi
+          
+          # 检查新方法是否添加成功
+          if grep -q "handleAutoAuth" "$MAIN_FILE"; then
+            echo "✓ New method added successfully"
+          else
+            echo "✗ Failed to add new method"
+            exit 1
+          fi
+          
+          echo "All modifications verified successfully"
+
+
+
+      - name: Repack VSIX
+        if: steps.check_version.outputs.skip_build == 'false'
+        run: |
+          cd unpacked_ext
+          # 重新打包为 VSIX
+          zip -r "../augment-vscode-modified-v${{ env.VERSION }}.vsix" . -x "*.git*"
+          cd ..
+          echo "VSIX repacked successfully as augment-vscode-modified-v${{ env.VERSION }}.vsix"
+
+      - name: Upload modified VSIX
+        if: steps.check_version.outputs.skip_build == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: augment-vscode-modified-v${{ env.VERSION }}
+          path: augment-vscode-modified-v${{ env.VERSION }}.vsix
+          retention-days: 30
+
+      - name: Create release
+        if: github.ref == 'refs/heads/main' && steps.check_version.outputs.skip_build == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: augment-vscode-modified-v${{ env.VERSION }}
+          name: Augment VSCode Modified v${{ env.VERSION }}
+          body: |
+            修改内容：
+            - 添加自动登录回调
+            - 添加防封注入
+
+            基于原版本: ${{ env.VERSION }}
+          files: |
+            augment-vscode-modified-v${{ env.VERSION }}.vsix
+          draft: false
+          prerelease: false
+
+      - name: Send file to Telegram channel
+        run: |
+          curl -sS -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendDocument" \
+            -F chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -F document="@augment-vscode-modified-v${{ env.VERSION }}.vsix" \
+            --form-string caption="
+            
+            修改内容：
+            - 添加自动登录回调
+            - 添加防封注入
+
+            基于原版本: ${{ env.VERSION }}
+            
+            "
