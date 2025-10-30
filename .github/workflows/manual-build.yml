@@ -261,16 +261,16 @@ jobs:
         run: |
           cd unpacked_ext
           # 重新打包为 VSIX
-          zip -r "../augment-vscode-modified-v${{ env.VERSION }}.vsix" . -x "*.git*"
+          zip -r "../augment-vscode-z-v${{ env.VERSION }}.vsix" . -x "*.git*"
           cd ..
-          echo "VSIX repacked successfully as augment-vscode-modified-v${{ env.VERSION }}.vsix"
+          echo "VSIX repacked successfully as augment-vscode-z-v${{ env.VERSION }}.vsix"
 
       - name: Upload modified VSIX
         if: steps.check_version.outputs.skip_build == 'false'
         uses: actions/upload-artifact@v4
         with:
-          name: augment-vscode-modified-v${{ env.VERSION }}
-          path: augment-vscode-modified-v${{ env.VERSION }}.vsix
+          name: augment-vscode-z-v${{ env.VERSION }}
+          path: augment-vscode-z-v${{ env.VERSION }}.vsix
           retention-days: 30
 
       - name: Create release
@@ -286,7 +286,7 @@ jobs:
 
             基于原版本: ${{ env.VERSION }}
           files: |
-            augment-vscode-modified-v${{ env.VERSION }}.vsix
+            augment-vscode-z-v${{ env.VERSION }}.vsix
           draft: false
           prerelease: false
 
@@ -294,7 +294,7 @@ jobs:
         run: |
           curl -sS -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendDocument" \
             -F chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
-            -F document="@augment-vscode-modified-v${{ env.VERSION }}.vsix" \
+            -F document="@augment-vscode-z-v${{ env.VERSION }}.vsix" \
             --form-string caption="
             🎉 Augment Code Z v${{ env.VERSION }}
 
