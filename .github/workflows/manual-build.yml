@@ -1,4 +1,4 @@
-name: Modify VS Code Extension (Manual)
+name: Build Augment Code Z (Manual)
 
 permissions:
   contents: write
@@ -48,10 +48,17 @@ jobs:
           echo "VERSION=${VERSION}" >> $GITHUB_ENV
           echo "Discovered extension version: ${VERSION}"
 
+      - name: Modify extension name
+        run: |
+          # 修改插件显示名称
+          jq '.displayName = "Augment Code Z"' unpacked_ext/extension/package.json > unpacked_ext/extension/package.json.tmp
+          mv unpacked_ext/extension/package.json.tmp unpacked_ext/extension/package.json
+          echo "✓ Extension name changed to: Augment Code Z"
+
       - name: Check if version already exists
         id: check_version
         run: |
-          TAG_NAME="augment-vscode-modified-v${VERSION}"
+          TAG_NAME="augment-code-z-v${VERSION}"
           if git ls-remote --tags origin | grep -q "refs/tags/${TAG_NAME}$"; then
             echo "Tag ${TAG_NAME} already exists, skipping build"
             echo "skip_build=true" >> $GITHUB_OUTPUT
@@ -270,8 +277,8 @@ jobs:
         if: github.ref == 'refs/heads/main' && steps.check_version.outputs.skip_build == 'false'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: augment-vscode-modified-v${{ env.VERSION }}
-          name: Augment VSCode Modified v${{ env.VERSION }}
+          tag_name: augment-code-z-v${{ env.VERSION }}
+          name: Augment Code Z v${{ env.VERSION }}
           body: |
             修改内容：
             - 添加自动登录回调
@@ -289,11 +296,12 @@ jobs:
             -F chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
             -F document="@augment-vscode-modified-v${{ env.VERSION }}.vsix" \
             --form-string caption="
-            
+            🎉 Augment Code Z v${{ env.VERSION }}
+
             修改内容：
             - 添加自动登录回调
             - 添加防封注入
 
             基于原版本: ${{ env.VERSION }}
-            
+
             "
