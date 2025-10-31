@@ -291,6 +291,7 @@ jobs:
           prerelease: false
 
       - name: Send file to Telegram channel
+        if: steps.check_version.outputs.skip_build == 'false'
         run: |
           curl -sS -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendDocument" \
             -F chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
