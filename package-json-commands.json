@@ -1,0 +1,15 @@
+{
+  "commands_to_add": [
+    {
+      "category": "Augment",
+      "command": "augment.custom.tokenManagement",
+      "title": "Token Management"
+    },
+    {
+      "category": "Augment",
+      "command": "augment.custom.directLogin",
+      "title": "Direct Login"
+    }
+  ]
+}
+
